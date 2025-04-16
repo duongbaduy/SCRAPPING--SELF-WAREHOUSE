@@ -1,0 +1,5 @@
+pandas
+selenium>=4.10 # Specify a recent version if needed
+webdriver-manager
+openpyxl       # Required by pandas for Excel (.xlsx) writing
+# requests     # Often implicitly installed with selenium/webdriver-manager, but good to list if used directly
