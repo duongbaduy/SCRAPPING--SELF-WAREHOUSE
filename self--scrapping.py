@@ -7,7 +7,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import time
 import re
-from urllib.parse import urlparse, parse_qs, urlsplit # <<< IMPORT THIS and others needed
+from urllib.parse import urlparse, parse_qs, urlsplit
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -37,7 +37,7 @@ def scrape_city(city):
     # options.add_argument("--headless") # Uncomment để chạy ẩn
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("--lang=en-US")
+    options.add_argument("--lang=en-US") # Use English for more consistent selectors
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
@@ -45,12 +45,11 @@ def scrape_city(city):
     driver = None
     try:
         # Khởi tạo WebDriver
-        # Use context manager for driver installation if preferred
-        # with ChromeDriverManager().install() as driver_path:
-        #     service = Service(driver_path)
-        #     driver = webdriver.Chrome(service=service, options=options)
+        print(f"[{city}] Khởi tạo trình duyệt Chrome...")
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        print(f"[{city}] Trình duyệt đã khởi tạo.")
 
+        # Stealth settings
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
                 Object.defineProperty(navigator, 'webdriver', {
@@ -65,21 +64,22 @@ def scrape_city(city):
 
         # --- Handle Consent ---
         try:
-            consent_locator = (By.XPATH, "//button[.//span[contains(text(), 'Accept all') or contains(text(), 'Agree') or contains(text(), 'Reject all')]] | //button[@aria-label='Accept all' or @aria-label='Agree' or @aria-label='Reject all'] | //button[contains(@jsname, 'b3VHJd')] | //form[contains(@action, 'consent')]//button")
-            consent_button = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(consent_locator))
-            # Try clicking directly first
+            # Using a more specific selector combining text and potential attributes
+            consent_locator = (By.XPATH, "//button[.//span[contains(text(), 'Accept all') or contains(text(), 'Reject all') or contains(text(), 'I agree')]] | //button[@aria-label='Accept all' or @aria-label='Reject all' or @aria-label='Agree'] | //form[contains(@action, 'consent')]//button[span]")
+            consent_button = WebDriverWait(driver, 7).until(EC.element_to_be_clickable(consent_locator))
             try:
                 consent_button.click()
+                print(f"[{city}] Đã nhấp nút consent.")
             except ElementClickInterceptedException:
-                 print(f"[{city}] Click trực tiếp bị chặn, thử dùng Javascript...")
+                 print(f"[{city}] Click consent bị chặn, thử Javascript...")
                  driver.execute_script("arguments[0].click();", consent_button)
-            print(f"[{city}] Đã xử lý cookies/consent.")
+                 print(f"[{city}] Đã nhấp nút consent bằng JS.")
             time.sleep(2)
         except TimeoutException:
             print(f"[{city}] Không tìm thấy nút consent hoặc không cần thiết.")
         except Exception as e:
             print(f"[{city}] Lỗi khi xử lý consent: {e}")
-            print(traceback.format_exc()) # Print stack trace for consent errors
+            # print(traceback.format_exc()) # Uncomment for detailed consent errors
 
         # --- Search ---
         try:
@@ -88,18 +88,24 @@ def scrape_city(city):
             search_box.send_keys(search_query)
             search_box.send_keys(Keys.ENTER)
             print(f"[{city}] Đã tìm kiếm: {search_query}")
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.XPATH, "//a[contains(@href, '/maps/place/')]"))
+            # Wait for the results list container OR the first result link
+            WebDriverWait(driver, 20).until(
+                 EC.any_of(
+                     EC.presence_of_element_located((By.XPATH, "//div[contains(@aria-label, 'Results for') or contains(@aria-label, 'Kết quả cho')]")),
+                     EC.presence_of_element_located((By.XPATH, "//a[contains(@href, '/maps/place/')]"))
+                 )
             )
             print(f"[{city}] Kết quả tìm kiếm đã bắt đầu xuất hiện.")
             time.sleep(5) # Allow results list to populate initially
         except Exception as e_search:
             print(f"[{city}] Lỗi nghiêm trọng khi thực hiện tìm kiếm: {e_search}")
-            raise
+            print(traceback.format_exc())
+            raise # Re-raise critical error
 
         # --- Scroll ---
         scroll_attempts = 0
-        max_scroll_attempts = 7 # Increased scroll attempts for potentially longer lists
+        max_scroll_attempts = 10 # Allow more scrolls if needed
+        # Scroll the div containing the results list, identified by aria-label
         feed_scroll_selector = "//div[contains(@aria-label, 'Results for') or contains(@aria-label, 'Kết quả cho')]/parent::div"
         try:
             feed_element = WebDriverWait(driver, 10).until(
@@ -108,40 +114,51 @@ def scrape_city(city):
             print(f"[{city}] Bắt đầu scroll panel kết quả...")
             last_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
             no_change_count = 0
-            end_of_list_xpath = "//span[contains(text(), \"You've reached the end of the list.\")]"
+            # XPath for the "end of list" message (can be span or p tag)
+            end_of_list_xpath = "//span[contains(text(), \"You've reached the end of the list.\")] | //p[contains(., \"You've reached the end of the list.\")]"
 
             while scroll_attempts < max_scroll_attempts:
-                # Check if 'You've reached the end of the list.' is visible
+                # Check if 'end of the list' message is visible
                 try:
-                     end_element = driver.find_element(By.XPATH, end_of_list_xpath)
-                     if end_element.is_displayed():
+                     end_elements = driver.find_elements(By.XPATH, end_of_list_xpath)
+                     is_end_visible = any(el.is_displayed() for el in end_elements)
+                     if is_end_visible:
                          print(f"[{city}] Phát hiện thông báo cuối danh sách. Dừng scroll.")
                          break
                 except NoSuchElementException:
-                    pass # Keep scrolling if not found
+                    pass # Expected if not at the end
 
                 # Scroll down using JS, targeting the specific feed element
                 driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", feed_element)
+                print(f"[{city}] Đã scroll lần {scroll_attempts + 1}...")
                 time.sleep(3.5) # Wait for content to load - adjust if needed
 
-                # Calculate new scroll height and compare with last scroll height
-                new_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
-                results_count_after_scroll = len(driver.find_elements(By.XPATH, "//div[contains(@aria-label, 'Results for') or contains(@aria-label, 'Kết quả cho')]/div/div//a[contains(@href, '/maps/place/') and @aria-label]"))
-                print(f"[{city}] Đã scroll lần {scroll_attempts + 1}. Chiều cao mới: {new_height}. Số kết quả hiện tại: {results_count_after_scroll}")
+                # Calculate new scroll height and compare
+                try:
+                    new_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
+                except Exception as e_scroll_height:
+                    print(f"[{city}] Lỗi khi lấy scrollHeight, có thể element bị stale. Thử tìm lại...")
+                    try:
+                        feed_element = driver.find_element(By.XPATH, feed_scroll_selector) # Try finding again
+                        new_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
+                    except Exception as e_refind:
+                         print(f"[{city}] Tìm lại element scroll cũng lỗi ({e_refind}). Dừng scroll.")
+                         break # Stop scrolling if element cannot be found/accessed
 
                 if new_height == last_height:
                     no_change_count += 1
                     print(f"[{city}] Chiều cao không đổi (lần {no_change_count}).")
-                    # Check for end-of-list message again after height check
+                     # Check end message again after height check confirms no change
                     try:
-                         end_element = driver.find_element(By.XPATH, end_of_list_xpath)
-                         if end_element.is_displayed():
+                         end_elements = driver.find_elements(By.XPATH, end_of_list_xpath)
+                         is_end_visible = any(el.is_displayed() for el in end_elements)
+                         if is_end_visible:
                              print(f"[{city}] Chiều cao không đổi VÀ thấy thông báo cuối danh sách. Dừng scroll.")
                              break
                     except NoSuchElementException:
                         pass
-                    # If height hasn't changed for a few attempts, assume end or error
-                    if no_change_count >= 3: # Increase threshold slightly
+                    # Stop if height hasn't changed for a few consecutive attempts
+                    if no_change_count >= 3:
                         print(f"[{city}] Chiều cao không đổi {no_change_count} lần liên tiếp. Dừng scroll.")
                         break
                 else:
@@ -154,42 +171,46 @@ def scrape_city(city):
                  print(f"[{city}] Đạt số lần scroll tối đa ({max_scroll_attempts}).")
 
         except TimeoutException:
-            print(f"[{city}] Không tìm thấy panel kết quả để scroll ({feed_scroll_selector}).")
+            print(f"[{city}] Không tìm thấy panel kết quả để scroll ({feed_scroll_selector}). Có thể không có kết quả.")
         except Exception as e:
              print(f"[{city}] Lỗi khi scroll: {e}")
              print(traceback.format_exc())
 
 
         # --- Get Result Links ---
-        # Adjusted XPath to be more specific to result items, avoiding nested links within ads sometimes
+        # XPath to find the 'a' tags that are direct children of result divs and contain place links
         results_xpath = "//div[contains(@aria-label, 'Results for') or contains(@aria-label, 'Kết quả cho')]/div/div[.//a[contains(@href, '/maps/place/')]]/a[@aria-label and contains(@href, '/maps/place/')]"
         result_links = []
         processed_links = set()
-        MAX_RESULTS = 20 # Set your desired limit
+        MAX_RESULTS_TO_COLLECT = 200 # Collect up to 200 links initially
         try:
-            WebDriverWait(driver, 10).until( # Increased wait after scroll
+            # Wait for at least one result link to be present after scrolling
+            WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.XPATH, results_xpath))
             )
             potential_results = driver.find_elements(By.XPATH, results_xpath)
-            print(f"[{city}] Tìm thấy {len(potential_results)} thẻ 'a' tiềm năng trong panel kết quả (dùng XPath đã chỉnh).")
+            print(f"[{city}] Tìm thấy {len(potential_results)} thẻ 'a' tiềm năng sau scroll.")
+
             for res in potential_results:
                  try:
                      href = res.get_attribute('href')
                      aria_label = res.get_attribute('aria-label')
-                     # Basic validation
+                     # Basic validation and check for duplicates
                      if href and href.startswith("https://www.google.com/maps/place/") and aria_label and href not in processed_links:
                          result_links.append({'href': href, 'aria_label': aria_label})
                          processed_links.add(href)
-                         if len(result_links) >= MAX_RESULTS:
-                             print(f"[{city}] Đã đạt giới hạn MAX_RESULTS ({MAX_RESULTS}).")
+                         if len(result_links) >= MAX_RESULTS_TO_COLLECT:
+                             print(f"[{city}] Đã thu thập đủ {MAX_RESULTS_TO_COLLECT} link.")
                              break
                  except StaleElementReferenceException:
-                     print(f"[{city}] Bỏ qua phần tử link bị stale.")
+                     print(f"[{city}] Bỏ qua phần tử link bị stale khi lấy href/label.")
                      continue
                  except Exception as e_link_attr:
                      print(f"[{city}] Lỗi khi lấy thuộc tính link: {e_link_attr}")
-                     continue
+                     continue # Skip this link
+
             print(f"[{city}] Thu thập được {len(result_links)} link kết quả hợp lệ.")
+
         except TimeoutException:
              print(f"[{city}] Không tìm thấy link kết quả nào ({results_xpath}) sau khi scroll/chờ.")
         except Exception as e:
@@ -201,21 +222,27 @@ def scrape_city(city):
         if not result_links:
              print(f"[{city}] Không có link kết quả nào để xử lý.")
 
+        MAX_RESULTS_TO_PROCESS = 20 # Define the actual limit for detailed processing
+
         for i, res_info in enumerate(result_links):
-            if i >= MAX_RESULTS: break
-            print(f"\n[{city}] === Đang xử lý Kết quả {i + 1}/{min(len(result_links), MAX_RESULTS)} ===")
-            original_gmaps_url = res_info.get('href', 'Lỗi lấy URL') # Store the original Gmaps link
+            # Stop if the processing limit is reached
+            if i >= MAX_RESULTS_TO_PROCESS:
+                print(f"[{city}] Đã đạt giới hạn xử lý {MAX_RESULTS_TO_PROCESS} kết quả.")
+                break
+
+            print(f"\n[{city}] === Đang xử lý Kết quả {i + 1}/{min(len(result_links), MAX_RESULTS_TO_PROCESS)} ===")
+            original_gmaps_url = res_info.get('href', 'Lỗi lấy URL')
             print(f"[{city}] Tên (từ link): {res_info.get('aria_label', 'N/A')}")
             print(f"[{city}] URL Gmaps gốc: {original_gmaps_url}")
 
-            # --- Initialize data fields ---
-            name = res_info.get('aria_label', "Lỗi lấy tên")
+            # --- Initialize data fields for each result ---
+            name = res_info.get('aria_label', "Lỗi lấy tên") # Use name from link as initial default
             address = "Lỗi lấy địa chỉ"
             phone_number = "Lỗi lấy SĐT"
-            website_url_full = "Không có trang web"
-            domain_name = "Không có trang web"
-            opening_hours = "Chưa kiểm tra trang web"
-            lat, lng = "", "" # Initialize Lat/Lng
+            website_url_full = "Chưa kiểm tra" # Will be updated if found
+            domain_name = "Chưa kiểm tra"      # Will be updated if found
+            opening_hours = "Chưa lấy từ GMap" # Default for GMap hours
+            lat, lng = "", ""                  # Initialize Lat/Lng
 
             try:
                 # --- Navigate to Google Maps Detail Page ---
@@ -223,34 +250,32 @@ def scrape_city(city):
                 driver.get(original_gmaps_url)
                 detail_page_url = "" # Initialize detail page URL
                 try:
-                     # Wait for H1 or the main content area to be somewhat loaded
+                     # Wait for H1 or main content area to be somewhat loaded
                      WebDriverWait(driver, 15).until(
                          EC.any_of(
                              EC.visibility_of_element_located((By.TAG_NAME, "h1")),
-                             EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='main']")) # A common wrapper for main content
+                             EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='main']"))
                          )
                      )
                      print(f"[{city}] Trang chi tiết Gmaps đã tải (thấy H1 hoặc main content).")
-                     # <<< IMPORTANT: Get CURRENT URL after waiting >>>
-                     time.sleep(1) # Small pause just in case URL updates slightly after EC condition met
-                     detail_page_url = driver.current_url
+                     time.sleep(1.5) # Pause slightly longer after load confirmation
+                     detail_page_url = driver.current_url # Get the possibly updated URL
                      print(f"[{city}] URL hiện tại sau khi tải: {detail_page_url}")
 
                 except TimeoutException:
                      print(f"[{city}] CẢNH BÁO: Trang chi tiết Gmaps tải chậm hoặc không có H1/main content trong 15s.")
-                     # Still try to get the current URL even if wait failed
-                     detail_page_url = driver.current_url
+                     detail_page_url = driver.current_url # Get URL anyway
                      print(f"[{city}] URL hiện tại (sau timeout): {detail_page_url}")
-                     time.sleep(5) # Give more time if elements not immediately visible
+                     time.sleep(5) # Give extra time if load was problematic
 
-                # --- Extract Lat/Lng (Prioritize current URL) ---
+                # --- Extract Lat/Lng ---
+                # (Prioritize current URL, fallback to original, then JS)
                 lat, lng = "", ""
                 coords_found = False
                 try:
-                    url_to_check_primary = detail_page_url if detail_page_url else original_gmaps_url # Use current if available
+                    url_to_check_primary = detail_page_url if detail_page_url else original_gmaps_url
                     print(f"[{city}] Đang kiểm tra tọa độ trong URL: {url_to_check_primary}")
-
-                    # --- Try extracting from PRIMARY URL (@ format) ---
+                    # Method 1: Look for @lat,lng format
                     url_pattern = re.compile(r'@(-?\d+\.\d+),(-?\d+\.\d+)')
                     coords_match = url_pattern.search(url_to_check_primary)
                     if coords_match:
@@ -259,161 +284,232 @@ def scrape_city(city):
                         print(f"[{city}] Đã trích xuất tọa độ từ URL (@): Lat {lat}, Lng {lng}")
                         coords_found = True
                     else:
-                        # --- Try extracting from PRIMARY URL (data= format) ---
-                        data_pattern = re.compile(r'data=.*?(!3d|%213d)(-?\d+\.\d+).*?(!4d|%214d)(-?\d+\.\d+)') # Handle encoding ! = %21
+                        # Method 2: Look for data=!3dlat!4dlng format (handles %21 encoding too)
+                        data_pattern = re.compile(r'data=.*?(!3d|%213d)(-?\d+\.\d+).*?(!4d|%214d)(-?\d+\.\d+)')
                         data_match = data_pattern.search(url_to_check_primary)
                         if data_match:
-                            # Groups depend on which separator was matched (!3d or %213d)
-                            lat = data_match.group(2) # Latitude value is always group 2
-                            lng = data_match.group(4) # Longitude value is always group 4
+                            lat = data_match.group(2) # Latitude value
+                            lng = data_match.group(4) # Longitude value
                             print(f"[{city}] Đã trích xuất tọa độ từ URL (data=): Lat {lat}, Lng {lng}")
                             coords_found = True
 
-                    # --- If not found in PRIMARY, try the OTHER URL as fallback ---
+                    # Method 3: Fallback to the *other* URL if not found in primary and URLs differ
                     if not coords_found and detail_page_url and original_gmaps_url != detail_page_url:
                         url_to_check_secondary = original_gmaps_url
                         print(f"[{city}] Không tìm thấy trong URL chính, thử URL gốc: {url_to_check_secondary}")
                         coords_match = url_pattern.search(url_to_check_secondary) # Check original URL (@)
                         if coords_match:
-                            lat = coords_match.group(1)
-                            lng = coords_match.group(2)
+                            lat = coords_match.group(1); lng = coords_match.group(2)
                             print(f"[{city}] Đã trích xuất tọa độ từ URL GỐC (@): Lat {lat}, Lng {lng}")
                             coords_found = True
                         else:
                             data_match = data_pattern.search(url_to_check_secondary) # Check original URL (data=)
                             if data_match:
-                                lat = data_match.group(2)
-                                lng = data_match.group(4)
+                                lat = data_match.group(2); lng = data_match.group(4)
                                 print(f"[{city}] Đã trích xuất tọa độ từ URL GỐC (data=): Lat {lat}, Lng {lng}")
                                 coords_found = True
 
-                    # --- If STILL not found, try the JavaScript fallback ---
-                    # (Keep the JS fallback as it was, it's a last resort)
+                    # Method 4: Fallback to JavaScript method (less reliable)
                     if not coords_found:
-                        print(f"[{city}] Không tìm thấy tọa độ trong URL, thử fallback JavaScript...")
-                        try:
-                            # Wait for the map to load and execute JavaScript to get coordinates
-                            time.sleep(2)  # Give maps time to initialize
+                         print(f"[{city}] Không tìm thấy tọa độ trong URL, thử fallback JavaScript...")
+                         try:
+                            time.sleep(2) # Give page time to potentially load JS variables
+                            # JS to find coords in meta tag or LD+JSON script
                             location_script = """
                                 var loc = document.querySelector('meta[property="og:image"]');
-                                if (loc) {
-                                    var imgSrc = loc.getAttribute('content');
-                                    var match = imgSrc.match(/center=([^&]+)/);
-                                    return match ? match[1] : null;
-                                }
-                                // Fallback: Try finding script tag with lat/lng (more fragile)
+                                if (loc) { var imgSrc = loc.getAttribute('content'); var match = imgSrc.match(/center=([^&]+)/); return match ? match[1] : null; }
                                 const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-                                for (const script of scripts) {
-                                    try {
-                                        const data = JSON.parse(script.textContent);
-                                        if (data && data.geo && data.geo.latitude && data.geo.longitude) {
-                                            return data.geo.latitude + ',' + data.geo.longitude;
-                                        }
-                                        // Look for other potential structures if needed
-                                    } catch (e) {}
-                                }
-                                return null;
-                            """
+                                for (const script of scripts) { try { const data = JSON.parse(script.textContent); if (data && data.geo && data.geo.latitude && data.geo.longitude) { return data.geo.latitude + ',' + data.geo.longitude; } } catch (e) {} }
+                                return null;"""
                             center_param = driver.execute_script(location_script)
-
                             if center_param and ',' in center_param:
                                 coords = center_param.split(',')
                                 if len(coords) >= 2:
-                                    lat_cand = coords[0].strip()
-                                    lng_cand = coords[1].strip()
-                                    # Basic validation for lat/lng values
+                                    lat_cand = coords[0].strip(); lng_cand = coords[1].strip()
+                                    # Validate format
                                     if re.match(r'^-?\d+\.\d+$', lat_cand) and re.match(r'^-?\d+\.\d+$', lng_cand):
-                                        lat = lat_cand
-                                        lng = lng_cand
+                                        lat = lat_cand; lng = lng_cand
                                         print(f"[{city}] Đã trích xuất tọa độ từ page source (JS fallback): Lat {lat}, Lng {lng}")
                                         coords_found = True
-                                    else:
-                                         print(f"[{city}] Giá trị JS fallback không hợp lệ: {center_param}")
-                                else:
-                                    print(f"[{city}] Không thể phân tích tọa độ từ center_param (JS fallback): {center_param}")
-                            else:
-                                print(f"[{city}] Không tìm thấy tọa độ qua JS fallback (meta/script).")
-                        except Exception as e_coords_js:
-                            print(f"[{city}] Lỗi khi cố gắng lấy tọa độ từ page (JS fallback): {e_coords_js}")
+                                    else: print(f"[{city}] Giá trị JS fallback không hợp lệ: {center_param}")
+                                else: print(f"[{city}] Không thể phân tích tọa độ từ center_param (JS fallback): {center_param}")
+                            else: print(f"[{city}] Không tìm thấy tọa độ qua JS fallback (meta/script).")
+                         except Exception as e_coords_js: print(f"[{city}] Lỗi khi cố gắng lấy tọa độ từ page (JS fallback): {e_coords_js}")
 
+                    # Final check if coordinates were found
                     if not coords_found:
                         print(f"[{city}] CẢNH BÁO: Không thể trích xuất tọa độ bằng mọi phương pháp.")
-                        lat, lng = "", "" # Ensure they are empty strings if not found
+                        lat, lng = "Không tìm thấy", "Không tìm thấy" # Set placeholder
 
                 except Exception as e_coords:
-                    lat, lng = "", ""
+                    lat, lng = "Lỗi tọa độ", "Lỗi tọa độ" # Set error placeholder
                     print(f"[{city}] Lỗi chung khi trích xuất tọa độ: {e_coords}")
-                    print(traceback.format_exc())
+                    # print(traceback.format_exc()) # Uncomment for detail if needed
 
-                # --- Get Name (từ H1) ---
-                # (Giữ nguyên logic lấy Tên, Địa chỉ, SĐT, Website, Giờ hoạt động)
-                # ... (Your existing code for Name, Address, Phone, Website, Hours) ...
-                # --- Get Name (từ H1) ---
+                # --- Get Name (from H1) ---
+                # Use H1 text if available and seems valid, otherwise keep name from link
                 try:
-                    name_element = WebDriverWait(driver, 5).until(
-                        EC.visibility_of_element_located((By.TAG_NAME, "h1"))
-                        )
+                    # Wait up to 8 seconds for H1 to be visible <<< INCREASED WAIT TIME
+                    name_element = WebDriverWait(driver, 8).until(EC.visibility_of_element_located((By.TAG_NAME, "h1")))
                     fetched_name = name_element.text.strip()
-                    if fetched_name: name = fetched_name
+                    if fetched_name: # Check if H1 text is not empty
+                        name = fetched_name # Update name if H1 is found
                     print(f"[{city}] Tên (H1): {name}")
-                except TimeoutException:
-                     print(f"[{city}] Không tìm thấy H1 trong 5s. Giữ tên từ aria-label.")
-                except NoSuchElementException:
-                     print(f"[{city}] Không tìm thấy H1. Giữ tên từ aria-label.")
-                except Exception as e_name:
-                     print(f"[{city}] Lỗi khi lấy tên từ H1: {e_name}.")
+                except TimeoutException: print(f"[{city}] Không tìm thấy H1 trong 8s. Giữ tên từ aria-label.") # Updated message
+                except NoSuchElementException: print(f"[{city}] Không tìm thấy H1. Giữ tên từ aria-label.")
+                except Exception as e_name: print(f"[{city}] Lỗi khi lấy tên từ H1: {e_name}.")
+
 
                 # --- Get Address ---
-                address = "Không lấy được địa chỉ"
-                try:
-                    # Prioritize button with specific data-item-id
-                    address_locator = (By.CSS_SELECTOR, "button[data-item-id='address'] div.Io6YTe, button[data-item-id='address'] div.QsDR1c")
-                    address_element = WebDriverWait(driver, 7).until(EC.visibility_of_element_located(address_locator))
-                    address = address_element.text.strip()
-                    print(f"[{city}] Địa chỉ (Button data-item-id): {address}")
-                except TimeoutException:
-                     print(f"[{city}] Không tìm thấy địa chỉ bằng button data-item-id. Thử tìm div chung hơn...")
-                     try:
-                         # Fallback to a div likely containing the address text near the icon
-                         # Looking for a div that contains text like St, Rd, NSW, etc. and is near the pin icon element
-                         address_alt_locator = (By.XPATH, "//button[contains(@aria-label, 'Address') or contains(@data-tooltip, 'Address')]/following-sibling::div[contains(@class, 'Io6YTe') or contains(@class, 'QsDR1c')] | //div[contains(@class,'Io6YTe')][string-length(text()) > 5 and (contains(., ' St') or contains(., ' Rd') or contains(., ' Ave') or contains(., ' NSW') or contains(., ' VIC') or contains(., ' QLD'))]")
-                         address_elements = WebDriverWait(driver, 5).until(EC.visibility_of_all_elements_located(address_alt_locator))
-                         if address_elements:
-                            # Select the most likely candidate (e.g., the first visible one with substantial text)
-                            for el in address_elements:
-                                addr_text = el.text.strip()
-                                if addr_text and len(addr_text) > 10: # Simple check for reasonable length
-                                    address = addr_text
-                                    print(f"[{city}] Địa chỉ (Fallback Div): {address}")
-                                    break
-                            if address == "Không lấy được địa chỉ": # If loop finished without finding suitable text
-                                print(f"[{city}] Địa chỉ fallback tìm thấy div nhưng text không phù hợp.")
-                         else:
-                             print(f"[{city}] Địa chỉ fallback không tìm thấy div phù hợp.")
+                # Assume 'driver' is your initialized WebDriver instance
+                # Assume 'city' is defined elsewhere for logging
 
-                     except Exception as e_addr_fallback:
-                          print(f"[{city}] Lấy địa chỉ fallback thất bại: {e_addr_fallback}")
-                except Exception as e_addr:
-                     print(f"[{city}] Lỗi khác khi lấy địa chỉ: {e_addr}")
-                     print(traceback.format_exc())
+                address = "Không lấy được địa chỉ" # Default error message
+                address_source = "N/A" # To track how the address was obtained
+                address_found = False # Flag to indicate if address was found
+
+                # --- METHOD 1: Primary Button (data-item-id) -> aria-label -> inner text ---
+                try:
+                    print(f"[{city}] Bắt đầu Method 1: Tìm button[data-item-id='address']...")
+                    button_locator = (By.CSS_SELECTOR, "button[data-item-id='address']")
+                    # INCREASED WAIT TIME slightly
+                    address_button = WebDriverWait(driver, 12).until(
+                        EC.visibility_of_element_located(button_locator)
+                    )
+                    print(f"[{city}] Method 1: Tìm thấy button[data-item-id='address'].")
+
+                    # Attempt 1a: Get from ARIA-LABEL
+                    try:
+                        aria_label_text = address_button.get_attribute('aria-label')
+                        if aria_label_text and 'Address: ' in aria_label_text:
+                            address = aria_label_text.replace('Address: ', '').strip()
+                            if address: # Check if address is not empty after stripping
+                                address_source = "Method 1a: aria-label"
+                                address_found = True
+                                print(f"[{city}] Địa chỉ ({address_source}): {address}")
+                            else:
+                                print(f"[{city}] Method 1a: aria-label sau khi làm sạch bị trống.")
+                        else:
+                            print(f"[{city}] Method 1a: aria-label không có 'Address: ' hoặc trống: '{aria_label_text}'.")
+                    except Exception as e_aria:
+                        print(f"[{city}] Method 1a: Lỗi khi lấy aria-label: {e_aria}.")
+
+                    # Attempt 1b: Get from INNER TEXT (Only if aria-label failed)
+                    if not address_found:
+                        print(f"[{city}] Method 1b: Thử lấy inner text từ button...")
+                        try:
+                            inner_div_locator = (By.CSS_SELECTOR, "div.Io6YTe, div.QsDR1c") # Keep both as potential inner divs
+                            address_element = address_button.find_element(*inner_div_locator)
+                            inner_text = address_element.text.strip()
+                            if inner_text and len(inner_text) > 5: # Basic check for meaningful text
+                                address = inner_text
+                                address_source = "Method 1b: inner text (div.Io6YTe/QsDR1c)"
+                                address_found = True
+                                print(f"[{city}] Địa chỉ ({address_source}): {address}")
+                            else:
+                                print(f"[{city}] Method 1b: Inner text tìm thấy nhưng trống hoặc quá ngắn.")
+                        except NoSuchElementException:
+                            print(f"[{city}] Method 1b: Không tìm thấy inner div (Io6YTe/QsDR1c) bên trong button.")
+                        except Exception as e_inner:
+                            print(f"[{city}] Method 1b: Lỗi khi lấy inner text: {e_inner}")
+
+                # --- Handle failure of Method 1 (Button not found or no address extracted from it) ---
+                except TimeoutException:
+                    print(f"[{city}] Method 1: Không tìm thấy button[data-item-id='address'] trong 12s.")
+                    # address_found remains False, proceed to Method 2
+                except Exception as e_addr_m1:
+                    print(f"[{city}] Method 1: Lỗi không xác định: {e_addr_m1}")
+                    # address_found remains False, proceed to Method 2
+
+                # --- METHOD 2: Direct Div Search (Specific Class - if Method 1 failed) ---
+                if not address_found:
+                    print(f"[{city}] Bắt đầu Method 2: Tìm trực tiếp div.Io6YTe.fontBodyMedium.kR99db.fdkmkc...")
+                    try:
+                        # Use precise class combination
+                        # NOTE: CSS selector with spaces in class needs '.' replacement:
+                        direct_div_locator = (By.CSS_SELECTOR, "div.Io6YTe.fontBodyMedium.kR99db.fdkmkc")
+                        # Wait for the specific div
+                        address_div_element = WebDriverWait(driver, 8).until(
+                            EC.visibility_of_element_located(direct_div_locator)
+                        )
+                        direct_text = address_div_element.text.strip()
+                        if direct_text and len(direct_text) > 10: # Check for meaningful address length
+                            address = direct_text
+                            address_source = "Method 2: Direct Div (Io6YTe...)"
+                            address_found = True
+                            print(f"[{city}] Địa chỉ ({address_source}): {address}")
+                        else:
+                            print(f"[{city}] Method 2: Tìm thấy div trực tiếp nhưng text trống hoặc quá ngắn: '{direct_text}'")
+                    except TimeoutException:
+                        print(f"[{city}] Method 2: Không tìm thấy div trực tiếp (Io6YTe...) trong 8s.")
+                    except Exception as e_addr_m2:
+                        print(f"[{city}] Method 2: Lỗi khi tìm div trực tiếp: {e_addr_m2}")
+
+                # --- METHOD 3: Complex Fallback (XPath - if Method 1 & 2 failed) ---
+                if not address_found:
+                    print(f"[{city}] Bắt đầu Method 3: Thử fallback phức tạp (XPath)...")
+                    try:
+                        # Your original complex XPath
+                        address_alt_locator = (By.XPATH, "//img[contains(@src,'ic_pin_place')]//ancestor::button/following-sibling::div[contains(@class,'Io6YTe')] | //button[contains(@aria-label, 'Address')]/div[contains(@class,'Io6YTe')] | //div[contains(@class,'Io6YTe')][string-length(normalize-space(.)) > 5 and (contains(., ' St') or contains(., ' Rd') or contains(., ' NSW'))]")
+                        # Using visibility_of_any_elements_located might be less reliable, let's try finding elements directly after a small wait
+                        WebDriverWait(driver, 5).until(lambda d: d.find_elements(*address_alt_locator)) # Wait until at least one element is found
+                        address_elements = driver.find_elements(*address_alt_locator)
+
+                        if address_elements:
+                            print(f"[{city}] Method 3: Tìm thấy {len(address_elements)} phần tử ứng viên bằng XPath.")
+                            found_in_fallback = False
+                            for el in address_elements:
+                                # Check visibility *and* get text in one go to avoid stale elements
+                                try:
+                                    if el.is_displayed():
+                                        addr_text = el.text.strip()
+                                        if addr_text and len(addr_text) > 10: # Basic check for meaningful address
+                                            address = addr_text
+                                            address_source = "Method 3: Complex Fallback XPath"
+                                            address_found = True
+                                            found_in_fallback = True
+                                            print(f"[{city}] Địa chỉ ({address_source}): {address}")
+                                            break # Use the first good one found
+                                except Exception as e_fallback_el:
+                                    print(f"[{city}] Method 3: Lỗi khi kiểm tra phần tử fallback: {e_fallback_el}")
+                            if not found_in_fallback:
+                                print(f"[{city}] Method 3: XPath tìm thấy phần tử nhưng không có text phù hợp/hiển thị.")
+                        else:
+                            print(f"[{city}] Method 3: XPath không tìm thấy phần tử nào.")
+                    except TimeoutException:
+                        print(f"[{city}] Method 3: Không tìm thấy phần tử nào bằng XPath trong 5s.")
+                    except Exception as e_addr_fallback:
+                        # Catch specific message if available
+                        msg = getattr(e_addr_fallback, 'msg', str(e_addr_fallback))
+                        print(f"[{city}] Method 3: Lấy địa chỉ fallback phức tạp thất bại: {msg}")
+
+
+                # --- Final Result ---
+                if not address_found:
+                    address = "Không lấy được địa chỉ" # Ensure default message if nothing worked
+                    address_source = "Thất bại"
+
+                print(f"[{city}] ===> KẾT QUẢ ĐỊA CHỈ: {address} (Nguồn: {address_source})")
+
 
                 # --- Get Phone Number ---
-                phone_number = "Không lấy được SĐT"
+                # Try specific container, then attributes, then generic tel link
+                phone_number = "Không lấy được SĐT" # Default error message
                 try:
-                    # Prioritize elements with data-item-id hinting phone number
+                    # Primary target: Button or Link with data-item-id starting 'phone:tel:' (Keep wait time moderate)
                     phone_container_locator = (By.CSS_SELECTOR, "a[data-item-id^='phone:tel:'], button[data-item-id^='phone:tel:']")
                     phone_container_element = WebDriverWait(driver, 7).until(EC.presence_of_element_located(phone_container_locator))
 
-                    # Try finding the visible text first (often inside a div)
+                    # Try getting visible text inside the container first
                     try:
                         phone_text_element = phone_container_element.find_element(By.CSS_SELECTOR, "div.Io6YTe, div.QsDR1c")
                         pn_text = phone_text_element.text.strip()
-                        if pn_text and re.search(r'[\d\+() ]{7,}', pn_text): # Check for digits, +, (), space, min length 7
+                        # Check if text looks like a phone number (digits, +, (), space, hyphen, min length)
+                        if pn_text and re.search(r'[\d\+() -]{7,}', pn_text):
                              phone_number = pn_text
-                             print(f"[{city}] SĐT (Text inside container): {phone_number}")
+                             print(f"[{city}] SĐT (Text): {phone_number}")
                         else:
-                            # If text is not phone-like, try other attributes
-                            raise NoSuchElementException
+                             raise NoSuchElementException # If text isn't phone-like, try attributes
                     except NoSuchElementException:
                         # If no inner text or not phone-like, check attributes of the container
                         aria_label = phone_container_element.get_attribute('aria-label')
@@ -424,17 +520,18 @@ def scrape_city(city):
                             print(f"[{city}] SĐT (Href): {phone_number}")
                         elif aria_label:
                             # Try extracting from aria-label (e.g., "Phone: +61 2...")
-                            match = re.search(r'(\+?\s?[\d\s()-]{8,})', aria_label) # Look for at least 8 digits/spaces/etc.
+                            # Look for a sequence of digits, spaces, (), -, +
+                            match = re.search(r'(\+?\s?[\d\s() -]{8,})', aria_label)
                             if match:
                                 phone_number = match.group(1).strip()
                                 print(f"[{city}] SĐT (Aria): {phone_number}")
                             else:
-                                phone_number = "Lỗi regex SĐT từ Aria"
+                                phone_number = "Lỗi regex SĐT từ Aria" # Regex failed
                         else:
-                            phone_number = "Container không có text/href/aria hợp lệ"
+                            phone_number = "Container không có text/href/aria hợp lệ" # No useful info found
 
                 except TimeoutException:
-                    print(f"[{city}] Không tìm thấy container SĐT chuẩn (data-item-id). Thử tìm link tel bất kỳ...")
+                    print(f"[{city}] Không tìm thấy container SĐT chuẩn (data-item-id). Thử tìm link tel: bất kỳ...")
                     try:
                         # Fallback: Find any link starting with 'tel:'
                         generic_phone_link = WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.CSS_SELECTOR, "a[href^='tel:']")))
@@ -442,270 +539,301 @@ def scrape_city(city):
                         if href and href.startswith('tel:'):
                             phone_number = href.replace('tel:', '').strip()
                             print(f"[{city}] SĐT (Generic Href): {phone_number}")
-                        else: phone_number = "Lỗi href SĐT generic"
+                        else:
+                            phone_number = "Lỗi href SĐT generic" # Found link but href invalid
                     except TimeoutException:
                          print(f"[{city}] Không tìm thấy link SĐT nào.")
-                         phone_number = "Không tìm thấy SĐT (Timeout)"
+                         phone_number = "Không tìm thấy SĐT (Timeout)" # Final failure state
                 except Exception as e_phone:
                     print(f"[{city}] Lỗi không xác định khi lấy SĐT: {e_phone}")
-                    print(traceback.format_exc())
+                    # print(traceback.format_exc()) # Uncomment for details
                     phone_number = "Lỗi không xác định khi lấy SĐT"
 
 
                 # --- Get Website URL from Google Maps ---
-                website_url_full = "Không có trang web"
-                domain_name = "Không có trang web"
+                # Try multiple selectors, handle redirects, extract domain
+                website_url_full = "Không có trang web" # Default
+                domain_name = "Không có trang web"      # Default
                 try:
-                    # Prioritize specific data-item-id or aria-label for website
+                    # List of selectors (CSS and XPath) to find the website link element
                     website_selectors = [
-                        "a[data-item-id='authority'][href^='http']",      # Often the primary website link
-                        "a[aria-label*='Website:'][href^='http']",        # Aria label starting with "Website:"
-                        "button[aria-label*='Website:']",                # Sometimes it's a button that reveals link
-                        "a[href*='://'][data-tooltip*='website' i]",      # Tooltip contains "website" (case-insensitive)
-                        "a[href*='://'][aria-label*='website' i]",       # Aria label contains "website"
+                        "a[data-item-id='authority'][href^='http']",      # Primary website link attribute
+                        "a[aria-label*='Website:'][href^='http']",        # Link with "Website:" in aria-label
+                        "button[aria-label*='Website:']",                # Button that might reveal link (less common now)
+                        "a[href*='://'][data-tooltip*='website' i]",      # Link with "website" in tooltip
+                        "a[href*='://'][aria-label*='website' i]",       # Link with "website" in aria-label
+                         # XPath: Find website icon (globe), go up ancestor divs, find link sibling/descendant
+                        "//img[contains(@src,'ic_public')]//ancestor::div[2]//a[@href^='http']",
+                        # XPath: Find button with 'Website' label, go to parent, find sibling div, find link inside
+                        "//button[contains(@aria-label, 'Website')]//ancestor::div[1]//following-sibling::div//a[@href^='http']",
                     ]
-                    found_url = None
+                    found_url = None # Stores the raw href found
+                    found_element = None # Stores the element itself
+
                     for selector in website_selectors:
                         try:
-                             elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                             for element in elements:
-                                # Skip hidden elements unless it's the only option found later
-                                # if not element.is_displayed() and found_url: continue
-
+                            # Determine if it's CSS or XPath
+                            find_method = By.CSS_SELECTOR if not selector.startswith("//") else By.XPATH
+                            # Wait briefly for element(s) matching this selector
+                            elements = WebDriverWait(driver, 2).until(
+                                EC.presence_of_all_elements_located((find_method, selector))
+                            )
+                            # Iterate through found elements (usually only one)
+                            for element in elements:
+                                # Prefer visible elements if possible
+                                # if not element.is_displayed(): continue
                                 href = element.get_attribute('href')
-                                # If it's a button, sometimes the website is in data-url or needs click (handle later if needed)
-                                if not href and element.tag_name == 'button':
-                                     # Placeholder for potentially clicking button later if needed
-                                     pass # print(f"[{city}] Found button for website, might need click: {element.get_attribute('aria-label')}")
-
+                                # Basic check for http(s) URL
                                 if href and href.startswith('http'):
-                                    # Basic check to avoid obvious map/search links if possible
-                                    parsed_temp = urlparse(href)
-                                    # Allow google redirects for now, handle later
-                                    # if 'google.com' not in parsed_temp.netloc and 'google.com.au' not in parsed_temp.netloc:
                                     found_url = href
+                                    found_element = element # Store the element for potential future interaction
                                     print(f"[{city}] Tìm thấy URL tiềm năng (Selector: {selector}): {found_url}")
-                                    # Prioritize non-google redirect links if found
+                                    # Prioritize non-google redirect links
                                     if '/url?q=' not in found_url:
-                                        break # Found a direct link, likely the best
-                                    # else keep checking for a potentially better direct link
-
-                             if found_url and '/url?q=' not in found_url: # Stop if direct link found
-                                 break
-                        except Exception as e_sel:
-                             print(f"[{city}] Lỗi nhỏ khi kiểm tra selector '{selector}': {e_sel}")
+                                        break # Found a direct link, likely the best, stop searching
+                            # If a direct link was found in the inner loop, break outer loop too
+                            if found_url and '/url?q=' not in found_url:
+                                break
+                        except TimeoutException:
+                             # This selector didn't find anything within the time limit
+                             continue # Try the next selector in the list
+                        except StaleElementReferenceException:
+                             print(f"[{city}] Phần tử trang web bị stale khi kiểm tra selector '{selector}'.")
                              continue # Try next selector
-
-                    # If still no URL or only google redirect found, try generic link near website icon
-                    if not found_url or '/url?q=' in found_url:
-                         try:
-                             # Look for a link immediately following the "Website" icon/button
-                             generic_website_link = driver.find_element(By.XPATH, "//button[contains(@aria-label, 'Website')]//ancestor::div[position()=1]//following-sibling::div//a[@href^='http'] | //img[contains(@aria-label, 'Website')]//ancestor::div[position()=1]//following-sibling::div//a[@href^='http']")
-                             generic_href = generic_website_link.get_attribute('href')
-                             if generic_href and generic_href.startswith('http'):
-                                 # Prefer this generic link if it's not a google redirect, otherwise keep the existing found_url
-                                 if '/url?q=' not in generic_href:
-                                      print(f"[{city}] Tìm thấy trang web (Generic Fallback near icon, direct): {generic_href}")
-                                      found_url = generic_href
-                                 elif not found_url: # Only use generic google redirect if nothing else was found
-                                      print(f"[{city}] Tìm thấy trang web (Generic Fallback near icon, redirect): {generic_href}")
-                                      found_url = generic_href
-
-                         except NoSuchElementException:
-                             print(f"[{city}] Không tìm thấy link generic gần icon website.")
-                         except Exception as e_gen:
-                             print(f"[{city}] Lỗi khi thử generic fallback cho website: {e_gen}")
-
+                        except Exception as e_sel:
+                             print(f"[{city}] Lỗi nhỏ khi kiểm tra selector trang web '{selector}': {e_sel}")
+                             continue # Try next selector
 
                     # --- Process the found URL ---
                     if found_url:
-                         # Handle Google URL redirects if necessary
+                         # Handle Google URL redirects if present
                          if '/url?q=' in found_url:
                               try:
-                                   # from urllib.parse import parse_qs, urlsplit # Already imported
+                                   # Parse the URL and extract the 'q' parameter
                                    query_params = parse_qs(urlsplit(found_url).query)
                                    if 'q' in query_params and query_params['q']:
-                                       website_url_full = query_params['q'][0]
+                                       website_url_full = query_params['q'][0] # Get the actual target URL
                                        print(f"[{city}] Trích xuất URL thực từ Google redirect: {website_url_full}")
                                    else:
-                                       website_url_full = found_url # Use redirect URL if extraction fails
+                                       # If 'q' param extraction fails, use the redirect URL as is
+                                       website_url_full = found_url
                                        print(f"[{city}] Giữ lại URL redirect (không trích xuất được q): {website_url_full}")
                               except Exception as e_redirect:
                                    print(f"[{city}] Lỗi khi xử lý Google redirect URL: {e_redirect}")
-                                   website_url_full = found_url # Fallback to using the redirect URL itself
+                                   website_url_full = found_url # Fallback to the raw redirect URL on error
                          else:
-                              website_url_full = found_url # It's a direct URL
+                              # It's a direct URL
+                              website_url_full = found_url
                               print(f"[{city}] Trang web trực tiếp: {website_url_full}")
 
                          # <<< START DOMAIN EXTRACTION >>>
+                         # Ensure we have a valid http(s) URL before parsing
                          if website_url_full and website_url_full.startswith('http'):
                              try:
                                  parsed_uri = urlparse(website_url_full)
-                                 # Normalize: remove www. and potential trailing slash
+                                 # Get network location (domain), convert to lower case
                                  netloc = parsed_uri.netloc.lower()
+                                 # Remove 'www.' prefix if it exists
                                  if netloc.startswith('www.'):
                                      domain_name = netloc[4:]
                                  else:
                                      domain_name = netloc
+                                 # Remove trailing slash if present (less common in netloc)
                                  domain_name = domain_name.rstrip('/')
                                  print(f"[{city}] Trích xuất tên miền: {domain_name}")
                              except Exception as e_parse:
                                  print(f"[{city}] Lỗi khi phân tích URL trang web thành tên miền: {e_parse}")
-                                 domain_name = "Lỗi phân tích URL"
+                                 domain_name = "Lỗi phân tích URL" # Set error state
+                         else:
+                              # If website_url_full is somehow invalid after processing
+                              domain_name = "Không có trang web (URL không hợp lệ)"
                          # <<< END DOMAIN EXTRACTION >>>
                     else:
+                         # No website link found using any selector
                          print(f"[{city}] Không tìm thấy link trang web trên Google Maps sau các lần thử.")
                          website_url_full = "Không có trang web"
                          domain_name = "Không có trang web"
 
                 except Exception as e_website_find:
-                    print(f"[{city}] Lỗi khi tìm link trang web trên Google Maps: {e_website_find}")
+                    # Catch any unexpected error during the website finding process
+                    print(f"[{city}] Lỗi chung khi tìm link trang web trên Google Maps: {e_website_find}")
                     print(traceback.format_exc())
                     website_url_full = "Lỗi tìm trang web"
                     domain_name = "Lỗi tìm trang web"
 
-                # --- Scrape Opening Hours from Website (if found) ---
-                opening_hours = "Chưa kiểm tra trang web" # Reset before check
-                if domain_name not in ["Không có trang web", "Lỗi tìm trang web", "Lỗi phân tích URL"]:
-                    print(f"[{city}] Đang điều hướng tới trang web: {website_url_full}")
-                    try:
-                        # Navigate with timeout handling
-                        driver.set_page_load_timeout(25) # Set timeout for page load
+
+                # --- Get Opening Hours from Google Maps ---
+                opening_hours = "Không lấy được giờ từ GMap" # Reset default state
+                try:
+                    # Strategy:
+                    # 1. Find the clickable trigger element (button/div containing current hours summary).
+                    # 2. Click the trigger using JavaScript.
+                    # 3. MANUALLY Wait for the detailed hours table (like the one provided) to appear by checking selectors individually.
+                    # 4. Extract text from the table.
+
+                    hours_panel_element = None # Will store the final detailed hours element
+
+                    # --- Define Selectors ---
+                    # Selectors for the DETAILED hours table/container THAT APPEARS AFTER CLICKING
+                    hours_container_selectors_after_click = [
+                        (By.XPATH, "//table[contains(@class, 'eK4R0e')]"), # *** Specific table class from example ***
+                        (By.XPATH, "//div[contains(@class, 't39EBf')]//table"), # Table inside the specific div class
+                        (By.XPATH, "//table[contains(@aria-label, 'Opening hours') or contains(@aria-label, 'giờ mở cửa')]"), # Table with aria-label
+                        (By.XPATH, "//div[contains(@aria-label, 'Opening hours') or contains(@aria-label, 'giờ mở cửa')]//div[@role='list']"), # Alt div structure
+                        (By.XPATH, "//div[contains(@class, 'm6QErb')]"), # Another potential container class
+                    ]
+
+                    # Locators for the element TO CLICK initially to show hours
+                    hours_trigger_selectors = [
+                        (By.XPATH, "//button[contains(@aria-label, 'Hour')] | //div[@role='button'][contains(@aria-label, 'Hour')] | //button[.//img[contains(@src,'ic_schedule')]] | //div[.//img[contains(@src,'ic_schedule')]][@role='button']"),
+                        (By.CSS_SELECTOR, "button[data-item-id^='oh']"),
+                        (By.XPATH, "//div[contains(@class, 'AeaXub')][@role='button']"),
+                        (By.CSS_SELECTOR, ".AeaXub[role='button'], button.AeaXub"),
+                        (By.XPATH, "//div[contains(text(), 'Open') or contains(text(), 'Closed') or contains(text(), 'Mở') or contains(text(), 'Đóng cửa')][string-length(normalize-space(.)) < 50]"),
+                    ]
+                    # --- End Define Selectors ---
+
+                    # Step 1 & 2: Find and Click the Trigger
+                    print(f"[{city}] Tìm nút/div hiển thị giờ để nhấp...")
+                    clicked = False
+                    hours_trigger_element = None
+
+                    for idx, selector in enumerate(hours_trigger_selectors):
                         try:
-                             driver.get(website_url_full)
+                            # Wait up to 5 seconds for each trigger selector <<< INCREASED WAIT TIME
+                            trigger_elements = WebDriverWait(driver, 5).until(
+                                EC.presence_of_all_elements_located(selector)
+                            )
+                            visible_triggers = [el for el in trigger_elements if el.is_displayed()]
+
+                            if visible_triggers:
+                                hours_trigger_element = visible_triggers[0]
+                                print(f"[{city}] Tìm thấy nút bấm giờ tiềm năng (Selector {idx+1}: {selector[1]}). Thử nhấp...")
+                                try:
+                                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", hours_trigger_element)
+                                    time.sleep(0.5)
+                                    driver.execute_script("arguments[0].click();", hours_trigger_element)
+                                    print(f"[{city}] Đã nhấp nút bấm giờ.")
+                                    clicked = True
+                                    time.sleep(1.5) # Wait for panel to open
+                                    break # Exit selector loop once clicked
+                                except ElementClickInterceptedException:
+                                    print(f"[{city}] Click nút giờ bị chặn (Selector {idx+1}: {selector[1]}). Thử selector khác.")
+                                except StaleElementReferenceException:
+                                     print(f"[{city}] Nút bấm giờ bị stale (Selector {idx+1}: {selector[1]}). Thử selector khác.")
+                                except Exception as e_click:
+                                    print(f"[{city}] Lỗi khi nhấp nút giờ (Selector {idx+1}: {selector[1]}): {e_click}")
                         except TimeoutException:
-                            print(f"[{city}] Lỗi: Trang web tải quá lâu (page load timeout > 25s). Dừng xử lý trang web.")
+                            # print(f"[{city}] Không tìm thấy nút bấm giờ trong 5s (Selector {idx+1}: {selector[1]}).") # Debug line
+                            continue # Try next selector
+                        except Exception as e_find_trigger:
+                            print(f"[{city}] Lỗi khi tìm nút bấm giờ (Selector {idx+1}: {selector[1]}): {e_find_trigger}")
+                            continue # Try next selector
+
+                    # Step 3: MANUALLY Wait for the DETAILED Panel/Table *after* clicking
+                    if clicked:
+                        print(f"[{city}] Chờ panel/bảng giờ chi tiết xuất hiện sau khi nhấp (tối đa ~7s)...")
+                        overall_wait_start = time.time()
+                        overall_timeout = 7 # seconds
+
+                        while time.time() - overall_wait_start < overall_timeout:
+                            for panel_selector in hours_container_selectors_after_click:
+                                try:
+                                    # Try finding the element using the current selector
+                                    found_panels = driver.find_elements(*panel_selector)
+                                    # Check if any of the found elements are visible
+                                    visible_panels = [p for p in found_panels if p.is_displayed()]
+                                    if visible_panels:
+                                        hours_panel_element = visible_panels[0] # Take the first visible one
+                                        print(f"[{city}] Panel/bảng giờ chi tiết đã xuất hiện (Selector: {panel_selector[1]}).")
+                                        # Optional: Prioritize 'eK4R0e' if multiple visible panels match different selectors
+                                        for p in visible_panels:
+                                             panel_class_attr = p.get_attribute('class') or "" # Handle None case
+                                             if 'eK4R0e' in panel_class_attr:
+                                                  hours_panel_element = p
+                                                  print(f"[{city}] Ưu tiên chọn panel giờ với class 'eK4R0e'.")
+                                                  break
+                                        break # Exit the inner loop (selectors)
+                                except NoSuchElementException:
+                                    # find_elements doesn't raise this, but keep for safety/clarity
+                                    continue
+                                except StaleElementReferenceException:
+                                    print(f"[{city}] Panel bị stale khi kiểm tra selector {panel_selector[1]}. Thử lại vòng lặp.")
+                                    # Let the outer loop retry
+                                    break # Break inner loop to retry outer loop quickly
+                                except Exception as e_find_panel:
+                                    # Log other potential errors during find_elements/is_displayed
+                                    print(f"[{city}] Lỗi nhỏ khi kiểm tra panel selector {panel_selector[1]}: {e_find_panel}")
+                                    # Continue checking other selectors in this iteration
+                                    continue
+
+                            if hours_panel_element:
+                                break # Exit the outer while loop (time-based)
+
+                            # Small pause before checking selectors again
+                            time.sleep(0.5)
+
+                        # After the loop, check if we found the panel
+                        if not hours_panel_element:
                             try:
-                                driver.execute_script("window.stop();") # Attempt to stop loading
-                            except WebDriverException as e_stop:
-                                print(f"[{city}] Lỗi khi cố gắng dừng tải trang: {e_stop}")
-                            opening_hours = "Lỗi tải trang web (Timeout)"
-                            # Skip further processing of this site by raising an exception that the outer block catches
-                            # raise TimeoutException("Page load timeout")
-                            # Or just set the opening_hours and let it continue to append data
-                        except WebDriverException as e_nav_web:
-                             # Catch navigation errors like DNS resolution, connection refused etc.
-                             print(f"[{city}] Lỗi WebDriver khi truy cập trang web '{website_url_full}': {e_nav_web}")
-                             if 'net::ERR_NAME_NOT_RESOLVED' in str(e_nav_web):
-                                 opening_hours = "Lỗi tải trang web (Không tìm thấy tên miền)"
-                             elif 'net::ERR_CONNECTION_REFUSED' in str(e_nav_web):
-                                  opening_hours = "Lỗi tải trang web (Kết nối bị từ chối)"
-                             elif 'net::ERR_CONNECTION_TIMED_OUT' in str(e_nav_web):
-                                 opening_hours = "Lỗi tải trang web (Hết thời gian chờ kết nối)"
-                             elif 'net::ERR_ABORTED' in str(e_nav_web):
-                                 opening_hours = "Lỗi tải trang web (Tải bị hủy)"
-                             else:
-                                  opening_hours = f"Lỗi tải trang web (WebDriver)"
-                             # Skip further processing for this site if navigation failed severely
-                             # raise WebDriverException("Web navigation failed")
+                                print(f"[{city}] Thử lấy giờ từ aria-label của div.t39EBf GUrTXd...")
+                                fallback_div = driver.find_element(By.CSS_SELECTOR, "div.t39EBf.GUrTXd[aria-label]")
+                                aria_label_text = fallback_div.get_attribute("aria-label")
+                                if aria_label_text:
+                                    opening_hours = aria_label_text.strip()
+                                    print(f"[{city}] Lấy giờ từ aria-label thành công:\n{opening_hours}")
+                            except Exception as e_aria:
+                                print(f"[{city}] Không lấy được aria-label fallback: {e_aria}")
 
 
-                        # If navigation didn't raise a fatal error, proceed
-                        if opening_hours == "Chưa kiểm tra trang web": # Check if navigation succeeded/wasn't fatal
-                            # Wait for body after potentially long load or partial load
-                            try:
-                                body_element = WebDriverWait(driver, 10).until(
-                                    EC.presence_of_element_located((By.TAG_NAME, "body"))
-                                )
-                                print(f"[{city}] Đã tải trang web (ít nhất là body). Đang lấy nội dung...")
-                                time.sleep(3) # Increased pause for JS rendering
-                                body_text = body_element.text.lower() # Get text content
-
-                                if not body_text or len(body_text) < 50: # Check if body text is meaningful
-                                    print(f"[{city}] CẢNH BÁO: Nội dung body trang web trống hoặc quá ngắn. Thử innerHTML.")
-                                    try:
-                                        body_html = driver.page_source.lower() # Get full source as fallback
-                                        # Very basic regex on HTML source - less reliable
-                                        html_matches = re.findall(r'>([^<]*?(?:hour|open|close|trading|access|mon|tue|wed|thu|fri|sat|sun)[^<]*?)<', body_html, re.IGNORECASE)
-                                        if html_matches:
-                                            potential_hour_lines_html = [re.sub('<[^>]+>', '', m).strip() for m in html_matches if len(m.strip()) > 3 and len(m.strip()) < 150]
-                                            potential_hour_lines_html = [line for line in potential_hour_lines_html if re.search(r'\d', line) or 'closed' in line or '24 hour' in line] # Must contain number or closed/24h
-                                            unique_lines = sorted(list(set(potential_hour_lines_html)), key=potential_hour_lines_html.index)
-                                            if unique_lines:
-                                                opening_hours = "\n".join(unique_lines[:8])
-                                                if len(unique_lines) > 8: opening_hours += "\n[... more lines truncated]"
-                                                print(f"[{city}] Thông tin giờ tiềm năng trích xuất từ HTML:\n{opening_hours}")
-                                            else:
-                                                opening_hours = "Nội dung trang web trống/ngắn (HTML không có giờ)"
-                                        else:
-                                            opening_hours = "Nội dung trang web trống/ngắn (Text và HTML)"
-                                    except Exception as e_html:
-                                         print(f"[{city}] Lỗi khi phân tích HTML trang web: {e_html}")
-                                         opening_hours = "Nội dung trang web trống/ngắn (Lỗi phân tích HTML)"
-                                else:
-                                     print(f"[{city}] Tìm kiếm từ khóa giờ trong {len(body_text)} ký tự text...")
-                                     # More focused regex for lines containing Day + Time or keywords
-                                     potential_hour_lines = []
-                                     lines = body_text.split('\n')
-                                     # Keywords needing stricter context (e.g., require digits nearby)
-                                     time_keywords = ['hour', 'open', 'close', 'trading', 'access', 'office', 'customer']
-                                     day_keywords = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun', 'weekday', 'weekend', 'daily', 'everyday', 'public holiday']
-
-                                     for line in lines:
-                                         line_strip = line.strip()
-                                         if len(line_strip) > 4 and len(line_strip) < 150: # Filter length
-                                             line_lower = line_strip.lower()
-                                             # Check for Day + Number/Range/Closed OR Time Keyword + Number/Range/Closed
-                                             has_day = any(day_kw in line_lower for day_kw in day_keywords)
-                                             has_time_num = re.search(r'\d{1,2}([:.]?\d{2})?\s*(am|pm)?', line_lower) # Match 9am, 5pm, 17:00 etc.
-                                             has_range = re.search(r'[-–to]', line_lower) or 'closed' in line_lower or '24 hour' in line_lower or 'appointment' in line_lower
-                                             has_keyword = any(kw in line_lower for kw in time_keywords)
-
-                                             # Rule 1: Must have a number/range/closed/appointment indicator
-                                             if not (has_time_num or has_range):
-                                                  continue
-
-                                             # Rule 2: Must have EITHER a day OR a relevant time keyword
-                                             if not (has_day or has_keyword):
-                                                  continue
-
-                                             # Add if rules pass and not already added
-                                             if line_strip not in potential_hour_lines:
-                                                 potential_hour_lines.append(line_strip)
+                    elif hours_trigger_element is None: # If no trigger was found at all
+                         print(f"[{city}] Không tìm thấy nút/thông tin giờ nào để nhấp vào.")
+                         opening_hours = "Không tìm thấy thông tin giờ ban đầu trên GMap"
+                    # else: # Trigger found but click failed (handled by 'clicked' flag)
 
 
-                                     if potential_hour_lines:
-                                         # Further filter/clean potential lines (optional, depends on noise)
-                                         # e.g., remove lines that are clearly just phone numbers mistaken for times
-                                         filtered_lines = [l for l in potential_hour_lines if not re.fullmatch(r'[\d\s()+-]+', l)]
+                    # Step 4: Extract text if panel element was successfully found
+                    if hours_panel_element: # Check if we successfully got the panel element from the manual wait
+                        try:
+                            # Get all text within the located panel/table element
+                            time.sleep(0.5) # Small delay before getting text
+                            hours_text = hours_panel_element.text
+                            if hours_text:
+                                # Clean the extracted text
+                                opening_hours = re.sub(r'\s*\n\s*', '\n', hours_text).strip()
+                                # Remove potential "Copy opening hours" text (adjust if needed)
+                                opening_hours = opening_hours.replace("Sao chép giờ mở cửa", "").strip()
+                                opening_hours = opening_hours.replace("Copy opening hours", "").strip()
+                                # Clean again after replacement
+                                opening_hours = re.sub(r'\n+', '\n', opening_hours).strip()
 
-                                         unique_lines = sorted(list(set(filtered_lines)), key=filtered_lines.index) # Use filtered list
-                                         opening_hours = "\n".join(unique_lines[:8]) # Limit lines stored
-                                         if len(unique_lines) > 8:
-                                             opening_hours += "\n[... more lines truncated]"
-                                         print(f"[{city}] Thông tin giờ tiềm năng trích xuất từ text trang web:\n{opening_hours}")
-                                     else:
-                                        # Check if *any* keyword was present even if no specific line matched
-                                        keyword_found_in_text = any(kw in body_text for kw in time_keywords + day_keywords)
-                                        if keyword_found_in_text:
-                                             opening_hours = "Tìm thấy từ khóa giờ nhưng không trích xuất được dòng cụ thể"
-                                        else:
-                                             opening_hours = "Không tìm thấy từ khóa/mẫu giờ trên trang web"
+                                print(f"[{city}] Giờ hoạt động trích xuất từ GMap:\n{opening_hours}")
+                            else:
+                                # Panel found but contains no text content
+                                opening_hours = "Panel giờ chi tiết trống"
+                                print(f"[{city}] Panel/bảng giờ chi tiết tìm thấy nhưng không có text.")
+                        except StaleElementReferenceException:
+                             print(f"[{city}] Lỗi: Panel giờ chi tiết bị stale khi đang lấy text.")
+                             opening_hours = "Lỗi lấy text giờ (Stale)"
+                        except Exception as e_get_text:
+                            print(f"[{city}] Lỗi khi lấy text từ panel giờ chi tiết: {e_get_text}")
+                            opening_hours = "Lỗi lấy text giờ chi tiết"
 
-                            except TimeoutException: # Catch timeout from WebDriverWait for body
-                                 print(f"[{city}] Lỗi: Không tìm thấy thẻ 'body' trang web trong 10s.")
-                                 opening_hours = "Lỗi tải trang web (Timeout phần tử body)"
-                            except Exception as e_scrape_web_body:
-                                print(f"[{city}] Lỗi không xác định khi lấy hoặc xử lý nội dung text/body trang web: {e_scrape_web_body}")
-                                print(traceback.format_exc())
-                                opening_hours = f"Lỗi xử lý nội dung trang web"
+                    # Final check: If hours still holds the initial default message, update based on outcome
+                    elif opening_hours == "Không lấy được giờ từ GMap":
+                        if not clicked and hours_trigger_element is None:
+                            opening_hours = "Không tìm thấy/click được thông tin giờ trên GMap" # No trigger found
+                        elif not clicked and hours_trigger_element is not None:
+                             opening_hours = "Lỗi click nút giờ (tất cả selectors thất bại)" # Trigger found but click failed
+                        # If click succeeded but panel didn't appear, message is already set in the wait block
 
-                    # except TimeoutException: # Already handled by specific try/except for driver.get
-                    #     # Message printed above
-                    #     pass
-                    # except WebDriverException: # Already handled by specific try/except for driver.get
-                    #      # Message printed above
-                    #      pass
-                    except Exception as e_scrape_web_outer:
-                        print(f"[{city}] Lỗi không xác định bên ngoài khi xử lý trang web: {e_scrape_web_outer}")
-                        print(traceback.format_exc())
-                        if opening_hours == "Chưa kiểm tra trang web": # If not set by inner errors
-                            opening_hours = f"Lỗi xử lý trang web (ngoài)"
-
-                elif domain_name == "Không có trang web":
-                    opening_hours = "Không có trang web để kiểm tra giờ"
-                else: # Handle other error cases for domain_name like "Lỗi tìm trang web"
-                     opening_hours = f"Không thể kiểm tra giờ ({domain_name})"
+                except Exception as e_hours_main:
+                     # Catch any unexpected error in the main hours block
+                     print(f"[{city}] Lỗi không xác định khi xử lý giờ mở cửa từ GMap: {e_hours_main}")
+                     print(traceback.format_exc())
+                     # Ensure a final error state if something unexpected happened
+                     if opening_hours == "Không lấy được giờ từ GMap": # If not set by inner errors
+                          opening_hours = "Lỗi xử lý giờ GMap (ngoài)"
 
 
                 # --- Append Data ---
@@ -714,56 +842,64 @@ def scrape_city(city):
                     "Tên công ty": name,
                     "Địa chỉ": address,
                     "Số điện thoại": phone_number,
-                    "Website": domain_name,          # Domain name stored here
-                    "Giờ hoạt động": opening_hours,
-                    "Google Maps URL": original_gmaps_url, # Store the original Gmaps URL
-                    "Vĩ độ": lat,                   # <<< Use the extracted lat
-                    "Kinh độ": lng,                   # <<< Use the extracted lng
+                    "Website": domain_name,          # Use extracted domain name
+                    "Giờ hoạt động": opening_hours, # Use hours extracted from GMap
+                    "Google Maps URL": original_gmaps_url, # Store original Gmaps link
+                    "Vĩ độ": lat,                   # Use extracted latitude
+                    "Kinh độ": lng,                   # Use extracted longitude
                     # "Full Website URL": website_url_full # Optional: Uncomment to keep full URL
                 })
-                print(f"[{city}] -> Đã thêm: {name} (Website: {domain_name}, Lat: {lat}, Lng: {lng})") # <<< Updated print
+                # Print summary, showing first line of hours for brevity
+                hours_summary = ' '.join(opening_hours.splitlines()[:1]) if isinstance(opening_hours, str) else opening_hours
+                print(f"[{city}] -> Đã thêm: {name} (Website: {domain_name}, Lat: {lat}, Lng: {lng}, Hours: {hours_summary}...)")
+
 
             except Exception as e_proc:
+                # Catch major errors during the processing of a single result
                 print(f"[{city}] !!! LỖI NGHIÊM TRỌNG khi xử lý KQ {i + 1} ({res_info.get('aria_label', 'N/A')}) !!!")
                 print(traceback.format_exc())
+                # Append error record to keep track
                 city_data.append({
                     "Thành phố": city,
                     "Tên công ty": res_info.get('aria_label', f"Lỗi xử lý KQ {i+1}"),
                     "Địa chỉ": "Lỗi xử lý",
                     "Số điện thoại": "Lỗi xử lý",
                     "Website": "Lỗi xử lý",
-                    "Giờ hoạt động": "Lỗi xử lý",
-                    "Google Maps URL": original_gmaps_url, # Store original URL even on error
-                    "Vĩ độ": "",   # <<< Ensure empty on error
-                    "Kinh độ": ""   # <<< Ensure empty on error
+                    "Giờ hoạt động": "Lỗi xử lý", # Indicate error state
+                    "Google Maps URL": original_gmaps_url, # Store URL even on error
+                    "Vĩ độ": "",   # Ensure empty on error
+                    "Kinh độ": ""   # Ensure empty on error
                 })
             finally:
-                # IMPORTANT: Navigate away to prevent JS interference
+                # IMPORTANT: Navigate away after processing each detail page
+                # This helps prevent JavaScript state from one page interfering with the next
                 print(f"[{city}] Điều hướng về Google Search để chuẩn bị cho mục tiếp theo...")
                 try:
-                    # Go to a simple, known page
+                    # Go to a simple, known page like a blank search
                     driver.get("https://www.google.com/search?q=next")
-                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "q"))) # Wait for search box
+                    # Wait briefly for the search input box to appear, confirming navigation
+                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "q")))
                     time.sleep(0.5) # Short extra pause
                 except Exception as e_nav_back:
                      print(f"[{city}] CẢNH BÁO: Không thể điều hướng về google search: {e_nav_back}. Thử làm mới.")
                      try:
-                         driver.refresh() # Try refreshing current page as fallback
+                         driver.refresh() # Try refreshing current page as a fallback
                          time.sleep(2)
                      except Exception as e_refresh:
-                          print(f"[{city}] CẢNH BÁO: Làm mới cũng thất bại: {e_refresh}")
-                          # Continue anyway, next loop will call driver.get() again
-                          pass
+                          print(f"[{city}] CẢNH BÁO: Làm mới trang cũng thất bại: {e_refresh}")
+                          # Continue anyway, the next loop iteration will call driver.get() for the Gmaps link
 
-
+        # --- End of loop processing results for one city ---
         print(f"--- Hoàn thành thu thập cho: {city} ---")
         return city_data
 
     except Exception as e_main:
+         # Catch critical errors in the main function for a city (e.g., driver init, search failure)
          print(f"[{city}] !!! LỖI NGHIÊM TRỌNG TRONG scrape_city !!!")
          print(traceback.format_exc())
          return [] # Return empty list on major failure for this city
     finally:
+        # Ensure the browser is closed even if errors occurred
         if driver:
             try:
                 driver.quit()
@@ -771,83 +907,136 @@ def scrape_city(city):
             except Exception as e_quit:
                 print(f"[{city}] Lỗi khi đóng trình duyệt: {e_quit}")
 
-# --- Main Execution ---
+# --- Main Execution Block ---
 start_time = time.time()
-all_data = []
+all_data = [] # List to store data from all cities
 print("=== BẮT ĐẦU QUÁ TRÌNH SCRAPE ===")
+
+# Loop through each city defined in the list
 for city in cities:
     city_start_time = time.time()
     try:
+        # Call the scraping function for the current city
         city_data = scrape_city(city)
+        # Check if data was returned (i.e., no critical error occurred)
         if city_data:
-            all_data.extend(city_data)
+            all_data.extend(city_data) # Add the city's data to the main list
             print(f"[{city}] Đã thêm {len(city_data)} kết quả vào danh sách tổng.")
         else:
-            print(f"[{city}] Không có dữ liệu trả về từ scrape_city.")
+            print(f"[{city}] Không có dữ liệu trả về từ scrape_city (có thể do lỗi nghiêm trọng hoặc không có kết quả).")
     except Exception as e_city_run:
+         # Catch unexpected errors during the function call itself
          print(f"!!! LỖI KHÔNG XỬ LÝ ĐƯỢC khi chạy scrape_city cho {city} !!!")
          print(traceback.format_exc())
+
     city_end_time = time.time()
     print(f"=== Hoàn thành {city} trong {city_end_time - city_start_time:.2f} giây ===")
-    if city != cities[-1]:
+
+    # Optional: Pause between cities
+    if city != cities[-1]: # Don't pause after the last city
         pause_duration = 5
         print(f"--- Tạm nghỉ {pause_duration} giây trước khi xử lý thành phố tiếp theo ---")
         time.sleep(pause_duration)
 
-# --- Export ---
+# --- Export Results ---
 if all_data:
-    print(f"\nTổng cộng thu thập được {len(all_data)} kết quả.")
+    print(f"\nTổng cộng thu thập được {len(all_data)} kết quả từ {len(cities)} thành phố.")
     print("Đang chuẩn bị xuất file Excel...")
+    # Create DataFrame from the collected data
     df = pd.DataFrame(all_data)
-    output_file = "tat_ca_kho_tu_quan_Australia_domain_hours_coords.xlsx" # Updated output name
+
+    # Define the desired output file name
+    output_file = "tat_ca_kho_tu_quan_Australia_gmap_hours_coords_final_v3.xlsx" # Added v3
+
     try:
-        # Define the desired column order
+        # Define the desired column order for the output file
         columns_order = [
             "Thành phố", "Tên công ty", "Địa chỉ", "Số điện thoại", "Website",
-            "Giờ hoạt động", "Google Maps URL", "Vĩ độ", "Kinh độ", 
-            # Optional: "Full Website URL"
+            "Giờ hoạt động", "Google Maps URL", "Vĩ độ", "Kinh độ",
+            # Optional: "Full Website URL" # Uncomment if you added this column
         ]
-        # Ensure all expected columns exist, add if missing with appropriate default
+        # Ensure all expected columns exist in the DataFrame, add if missing with empty string
         for col in columns_order:
             if col not in df.columns:
-                df[col] = "" # Use empty string or pd.NA as default
+                df[col] = "" # Use empty string as default for missing columns
 
-        df = df.reindex(columns=columns_order) # Reorder/select columns
+        # Reindex the DataFrame to enforce the desired column order and include any added columns
+        df = df.reindex(columns=columns_order)
 
-        # Optional: Clean up phone numbers (remove extra spaces, etc.)
+        # --- Optional Data Cleaning ---
+        # Clean up phone numbers (remove extra spaces, etc.)
         if "Số điện thoại" in df.columns:
-            df["Số điện thoại"] = df["Số điện thoại"].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
+            df["Số điện thoại"] = df["Số điện thoại"].astype(str).str.replace(r'\s{2,}', ' ', regex=True).str.strip()
+            # Replace common error messages with empty string or N/A if preferred
+            phone_errors = ["Không lấy được SĐT", "Lỗi regex SĐT từ Aria", "Container không có text/href/aria hợp lệ",
+                            "Lỗi href SĐT generic", "Không tìm thấy SĐT (Timeout)", "Lỗi không xác định khi lấy SĐT", "Lỗi xử lý"]
+            df["Số điện thoại"] = df["Số điện thoại"].replace(phone_errors, 'N/A')
 
-        # Optional: Fill missing Lat/Lng with a placeholder if preferred over blank
-        df['Vĩ độ'] = df['Vĩ độ'].fillna('N/A')
-        df['Kinh độ'] = df['Kinh độ'].fillna('N/A')
+        # Clean up Website (Domain) column
+        if "Website" in df.columns:
+             website_errors = ["Lỗi phân tích URL", "Lỗi tìm trang web", "Không có trang web (URL không hợp lệ)", "Lỗi xử lý", "Chưa kiểm tra"]
+             df["Website"] = df["Website"].replace(website_errors, 'Không có trang web')
 
+
+        # Clean up Lat/Lng columns (replace placeholders/errors)
+        coord_errors = ["Không tìm thấy", "Lỗi tọa độ", "Lỗi xử lý", ""]
+        df['Vĩ độ'] = df['Vĩ độ'].replace(coord_errors, 'N/A').fillna('N/A')
+        df['Kinh độ'] = df['Kinh độ'].replace(coord_errors, 'N/A').fillna('N/A')
+
+        # Clean up Hours column (standardize error messages)
+        if "Giờ hoạt động" in df.columns:
+            hours_errors = [ "Không lấy được giờ từ GMap", "Không mở được panel giờ chi tiết sau khi nhấp",
+                             "Lỗi chờ panel giờ chi tiết", "Không tìm thấy thông tin giờ ban đầu trên GMap",
+                             "Panel giờ chi tiết trống", "Lỗi lấy text giờ (Stale)", "Lỗi lấy text giờ chi tiết",
+                             "Lỗi xử lý giờ GMap (ngoài)", "Không tìm thấy/click được thông tin giờ trên GMap",
+                             "Lỗi click nút giờ (tất cả selectors thất bại)", "Lỗi xử lý"]
+            df["Giờ hoạt động"] = df["Giờ hoạt động"].replace(hours_errors, 'Không có thông tin giờ')
+            df["Giờ hoạt động"] = df["Giờ hoạt động"].astype(str).str.strip() # Ensure trimming
+
+
+        # Attempt to save to Excel
         df.to_excel(output_file, index=False, engine='openpyxl')
         print(f"\n🎉 Đã lưu xong toàn bộ dữ liệu vào file '{output_file}'!")
+
     except ImportError:
-         print("\n🚨 Lỗi: Thư viện 'openpyxl' chưa được cài đặt. Vui lòng chạy: pip install openpyxl")
-         print("Đang thử lưu sang CSV...")
-         output_file_csv = "tat_ca_kho_tu_quan_Australia_domain_hours_coords.csv"
+         # Handle case where openpyxl is not installed
+         print("\n🚨 Lỗi: Thư viện 'openpyxl' chưa được cài đặt.")
+         print("   Vui lòng chạy: pip install openpyxl")
+         print("Đang thử lưu sang định dạng CSV thay thế...")
+         output_file_csv = "tat_ca_kho_tu_quan_Australia_gmap_hours_coords_final_v3.csv" # Added v3
          try:
-             df.to_csv(output_file_csv, index=False, encoding='utf-8-sig')
+             # Ensure correct column order for CSV backup as well
+             if all(col in df.columns for col in columns_order):
+                 df_csv = df[columns_order] # Select columns in order
+             else:
+                 df_csv = df # Use DataFrame as is if reindex failed somehow
+             # Save to CSV with UTF-8 encoding (with BOM for Excel compatibility)
+             df_csv.to_csv(output_file_csv, index=False, encoding='utf-8-sig')
              print(f"\n⚠️ Đã lưu tạm thời vào file CSV '{output_file_csv}'.")
          except Exception as e_csv:
-            print(f"\n🚨 Lỗi khi lưu file CSV: {e_csv}")
+            print(f"\n🚨 Lỗi nghiêm trọng khi lưu file CSV thay thế: {e_csv}")
+
     except Exception as e_excel:
-        print(f"\n🚨 Lỗi khi lưu file Excel ({output_file}): {e_excel}")
-        print(traceback.format_exc()) # Print detailed excel error
-        output_file_csv = "tat_ca_kho_tu_quan_Australia_domain_hours_coords.csv"
+        # Handle other potential errors during Excel export
+        print(f"\n🚨 Lỗi khi lưu file Excel '{output_file}': {e_excel}")
+        print(traceback.format_exc()) # Print detailed Excel error
+        print("Đang thử lưu sang định dạng CSV thay thế...")
+        output_file_csv = "tat_ca_kho_tu_quan_Australia_gmap_hours_coords_final_v3.csv" # Added v3
         try:
-            # Ensure correct column order for CSV too
-            if all(col in df.columns for col in columns_order):
-                 df = df[columns_order]
-            df.to_csv(output_file_csv, index=False, encoding='utf-8-sig')
-            print(f"\n⚠️ Đã lưu tạm thời vào file CSV '{output_file_csv}' do lỗi Excel.")
-        except Exception as e_csv:
-            print(f"\n🚨 Lỗi khi lưu file CSV thứ cấp: {e_csv}")
+             # Ensure correct column order for CSV backup
+             if all(col in df.columns for col in columns_order):
+                 df_csv = df[columns_order]
+             else:
+                 df_csv = df
+             df_csv.to_csv(output_file_csv, index=False, encoding='utf-8-sig')
+             print(f"\n⚠️ Đã lưu tạm thời vào file CSV '{output_file_csv}' do lỗi Excel.")
+        except Exception as e_csv_fallback:
+            print(f"\n🚨 Lỗi nghiêm trọng khi lưu file CSV thay thế (sau lỗi Excel): {e_csv_fallback}")
 else:
+    # Message if no data was collected from any city
     print("\n🤷 Không thu thập được dữ liệu nào từ bất kỳ thành phố nào.")
 
+# --- Final Timing ---
 end_time = time.time()
 total_duration = end_time - start_time
 print(f"\n=== HOÀN THÀNH TOÀN BỘ QUÁ TRÌNH TRONG {total_duration:.2f} giây ({total_duration/60:.2f} phút) ===")
