@@ -185,7 +185,7 @@ def scrape_city(city, log_callback):
         # --- Navigate and Initial Wait ---
         driver.get("https://www.google.com/maps")
         log_callback(f"[{city}] Đã mở Google Maps.")
-        time.sleep(random.uniform(3.0, 5.0)) # Slightly longer initial wait
+        time.sleep(random.uniform(3.0, 4.0)) # Slightly longer initial wait
 
         # --- CAPTCHA Check 1: After initial load ---
         captcha_present, _ = check_for_captcha(driver, log_callback, "Initial Load")
