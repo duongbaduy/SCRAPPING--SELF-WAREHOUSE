@@ -185,7 +185,7 @@ def scrape_city(city, log_callback):
         # --- Navigate and Initial Wait ---
         driver.get("https://www.google.com/maps")
         log_callback(f"[{city}] Đã mở Google Maps.")
-        time.sleep(random.uniform(3.0, 4.0)) # Slightly longer initial wait
+        time.sleep(random.uniform(2.0, 3.0)) # Slightly longer initial wait
 
         # --- CAPTCHA Check 1: After initial load ---
         captcha_present, _ = check_for_captcha(driver, log_callback, "Initial Load")
@@ -200,7 +200,7 @@ def scrape_city(city, log_callback):
         try:
             # More robust selector combining different possible button texts/labels
             consent_locator = (By.XPATH, "//button[.//span[contains(text(), 'Accept all') or contains(text(), 'Reject all') or contains(text(), 'I agree') or contains(text(), 'Manage options')]] | //button[contains(@aria-label, 'Accept all') or contains(@aria-label, 'Reject all') or contains(@aria-label, 'Agree') or contains(@aria-label, 'manage') or contains(@aria-label, 'options')] | //form[contains(@action, 'consent')]//button[span]")
-            consent_button = WebDriverWait(driver, 7).until(EC.element_to_be_clickable(consent_locator))
+            consent_button = WebDriverWait(driver, 4).until(EC.element_to_be_clickable(consent_locator))
             log_callback(f"[{city}] Tìm thấy nút consent/manage options. Thử nhấp...")
             # Prioritize clicking "Accept all" or "Agree" if multiple buttons match
             possible_texts = ["Accept all", "Agree", "I agree"]
@@ -239,7 +239,7 @@ def scrape_city(city, log_callback):
 
         # --- Search ---
         try:
-            search_box = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, "searchboxinput")))
+            search_box = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.ID, "searchboxinput")))
             search_box.clear()
             # Simulate typing more naturally
             log_callback(f"[{city}] Bắt đầu gõ vào ô tìm kiếm...")
@@ -255,7 +255,7 @@ def scrape_city(city, log_callback):
             no_results_xpath = "//div[contains(@class, 'fontBodyMedium') and (contains(., 'No results found') or contains(., 'did not match any locations'))] | //div[contains(text(), \"Google Maps can't find\")]"
             first_link_xpath = "//a[contains(@href, '/maps/place/')][@aria-label]"
 
-            WebDriverWait(driver, 25).until( # Longer wait for search results
+            WebDriverWait(driver, 15).until( # Longer wait for search results
                  EC.any_of(
                      EC.presence_of_element_located((By.XPATH, results_indicator_xpath)),
                      EC.presence_of_element_located((By.XPATH, no_results_xpath)),
@@ -263,7 +263,7 @@ def scrape_city(city, log_callback):
                  )
             )
             log_callback(f"[{city}] Trang kết quả đã bắt đầu tải (hoặc báo không có kết quả).")
-            time.sleep(random.uniform(4, 7)) # Wait longer for results/potential CAPTCHA
+            time.sleep(random.uniform(4, 8)) # Wait longer for results/potential CAPTCHA
 
             # --- CAPTCHA Check 2: After search results appear (or fail) ---
             captcha_present, _ = check_for_captcha(driver, log_callback, "After Search")
@@ -314,84 +314,159 @@ def scrape_city(city, log_callback):
 
         # --- Scroll ---
         scroll_attempts = 0
-        # Use config for max scrolls
-        max_scroll_attempts = MAX_SCROLL_ATTEMPTS
-        # Updated selector for the scrollable feed
-        feed_scroll_selector = "//div[contains(@aria-label, 'Results for') or contains(@aria-label, 'Kết quả cho')]/parent::div | //div[contains(@class, 'm6QErb')][@role='feed']" # Added alternative class
+        max_scroll_attempts = MAX_SCROLL_ATTEMPTS # Use config
+        # Keep the selector, it seems appropriate based on the HTML provided
+        # Prioritize the role=feed selector as it's more specific to the scrollable area
+        feed_scroll_selector = "//div[@role='feed'][contains(@aria-label, 'Results for') or contains(@aria-label, 'Kết quả cho')]"
+        # Fallback selector if the primary one fails (less specific, might grab the wrong m6QErb)
+        # feed_scroll_selector_fallback = "//div[contains(@class, 'm6QErb')][@role='feed']"
+
         try:
-            feed_element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, feed_scroll_selector))
-            )
+            feed_element = None
+            try:
+                log_callback(f"[{city}] Attempting to find primary scroll feed element ({feed_scroll_selector})...")
+                # Wait for VISIBILITY, not just presence, might be more reliable
+                feed_element = WebDriverWait(driver, 15).until(
+                    EC.visibility_of_element_located((By.XPATH, feed_scroll_selector))
+                )
+                log_callback(f"[{city}] Found primary scroll feed element.")
+            except TimeoutException:
+                log_callback(f"[{city}] Primary scroll feed element not found/visible. Trying fallback (commented out for now).")
+                # Optional: Implement fallback selector logic here if needed later
+                # try:
+                #     log_callback(f"[{city}] Attempting to find fallback scroll feed element ({feed_scroll_selector_fallback})...")
+                #     feed_element = WebDriverWait(driver, 5).until(
+                #         EC.visibility_of_element_located((By.XPATH, feed_scroll_selector_fallback))
+                #     )
+                #     log_callback(f"[{city}] Found fallback scroll feed element.")
+                # except TimeoutException:
+                #     log_callback(f"[{city}] Fallback scroll feed element also not found/visible. Cannot scroll.")
+                #     raise # Re-raise the exception to be caught by the outer block
+
+            if not feed_element:
+                raise TimeoutException(f"Could not find a suitable element to scroll using selectors.")
+
+
             log_callback(f"[{city}] Bắt đầu scroll panel kết quả...")
+            # Add a small delay before starting scroll, allow rendering finish
+            time.sleep(random.uniform(1.5, 2.5))
+
             last_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
+            log_callback(f"[{city}] Initial scrollHeight: {last_height}")
             no_change_count = 0
-            # Updated end of list detection (more robust)
-            end_of_list_xpath = "//span[contains(text(), \"You've reached the end of the list.\")] | //p[contains(., \"You've reached the end of the list.\")] | //span[contains(text(), \"Keine weiteren Ergebnisse\") or contains(text(), \"Aucun autre résultat\")] | //div[contains(@class, 'PbZDve')]//p[contains(@class,'fontBodyMedium')]" # Added generic end-of-list container class
+            # Keep the robust end-of-list XPath
+            end_of_list_xpath = "//span[contains(text(), \"You've reached the end of the list.\")] | //p[contains(., \"You've reached the end of the list.\")] | //span[contains(text(), \"Keine weiteren Ergebnisse\") or contains(text(), \"Aucun autre résultat\")] | //div[contains(@class, 'PbZDve')]//p[contains(@class,'fontBodyMedium')]"
 
             while scroll_attempts < max_scroll_attempts:
+                scroll_attempt_start_time = time.time()
                 is_end_visible = False
                 try:
-                     end_elements = driver.find_elements(By.XPATH, end_of_list_xpath)
-                     is_end_visible = any(el.is_displayed() for el in end_elements)
-                     if is_end_visible:
-                         log_callback(f"[{city}] Phát hiện thông báo cuối danh sách. Dừng scroll.")
-                         break
-                except (NoSuchElementException, StaleElementReferenceException): pass # Ignore if end element goes stale/not found during check
+                    # Check for end before scrolling this iteration
+                    end_elements = driver.find_elements(By.XPATH, end_of_list_xpath)
+                    is_end_visible = any(el.is_displayed() for el in end_elements)
+                    if is_end_visible:
+                        log_callback(f"[{city}] Phát hiện thông báo cuối danh sách (trước scroll). Dừng scroll.")
+                        break
+                except (NoSuchElementException, StaleElementReferenceException):
+                    log_callback(f"[{city}] Minor exception checking for end-of-list (before scroll).")
+                    pass # Ignore if end element goes stale/not found during check
 
-                # Scroll down using JS
-                driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", feed_element)
-                log_callback(f"[{city}] Đã scroll lần {scroll_attempts + 1}/{max_scroll_attempts}...")
-                time.sleep(random.uniform(2.5, 4.5)) # Slightly longer pause between scrolls
+                # --- Scrolling Action ---
+                scroll_success = False
+                try:
+                    # Try JS scroll first (most common)
+                    log_callback(f"[{city}] Attempting JS scroll (Attempt {scroll_attempts + 1}/{max_scroll_attempts})...")
+                    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", feed_element)
+                    scroll_success = True
+                    log_callback(f"[{city}] JS scroll executed.")
+                except WebDriverException as e_js_scroll:
+                    log_callback(f"[{city}] JS scroll failed: {e_js_scroll}. Trying PAGE_DOWN key...")
+                    try:
+                        # Ensure element focus (optional but can help)
+                        # ActionChains(driver).move_to_element(feed_element).click().perform()
+                        # time.sleep(0.5)
+                        feed_element.send_keys(Keys.PAGE_DOWN)
+                        log_callback(f"[{city}] Sent PAGE_DOWN key.")
+                        scroll_success = True # Assume it worked, height check will verify
+                    except Exception as e_key_scroll:
+                        log_callback(f"[{city}] PAGE_DOWN key also failed: {e_key_scroll}. Scroll attempt failed.")
+                        # Potentially try window scroll as last resort
+                        # try:
+                        #     log_callback(f"[{city}] Trying window scroll as last resort...")
+                        #     driver.execute_script("window.scrollBy(0, 600);") # Scroll window down
+                        #     scroll_success = True
+                        # except Exception as e_window_scroll:
+                        #     log_callback(f"[{city}] Window scroll also failed: {e_window_scroll}")
+                        #     break # Give up scrolling for this city if all methods fail
 
-                # Check height change reliably
+                # --- Wait After Scroll ---
+                # Increase wait time slightly, especially after the first few scrolls
+                wait_time = random.uniform(3.0, 5.5) if scroll_attempts < 5 else random.uniform(2.5, 4.5)
+                log_callback(f"[{city}] Waiting {wait_time:.1f}s after scroll...")
+                time.sleep(wait_time)
+
+                # --- Check Height Change Reliably ---
                 new_height = last_height # Default to last height in case of error
                 try:
-                    # Ensure the element is still attached before getting scrollHeight
-                    if feed_element.is_enabled(): # Check if still interactable
-                        new_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
+                    # Re-fetch the element in case it went stale during the wait
+                    current_feed_element = driver.find_element(By.XPATH, feed_scroll_selector)
+                    # Check if still interactable/visible might be redundant if find_element worked, but cautious
+                    if current_feed_element.is_displayed() and current_feed_element.is_enabled():
+                        new_height = driver.execute_script("return arguments[0].scrollHeight", current_feed_element)
+                        log_callback(f"[{city}] Current scrollHeight: {new_height} (was {last_height})")
+                        feed_element = current_feed_element # Update reference if re-fetched
                     else:
-                         log_callback(f"[{city}] Element scroll không còn enabled, thử tìm lại...")
-                         raise StaleElementReferenceException("Feed element detached")
-
-                except StaleElementReferenceException:
-                    log_callback(f"[{city}] Element scroll bị stale, thử tìm lại...")
-                    try:
+                        log_callback(f"[{city}] Scroll element found but not displayed/enabled after wait. Re-finding...")
                         feed_element = WebDriverWait(driver, 5).until(
-                            EC.presence_of_element_located((By.XPATH, feed_scroll_selector))
+                            EC.visibility_of_element_located((By.XPATH, feed_scroll_selector))
                         )
                         new_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
-                        log_callback(f"[{city}] Tìm lại element scroll thành công.")
+                        log_callback(f"[{city}] Re-found scroll element. New scrollHeight: {new_height}")
+                        no_change_count = 0 # Reset counter after re-find
+
+                except StaleElementReferenceException:
+                    log_callback(f"[{city}] Scroll element became stale after wait. Trying to re-find...")
+                    try:
+                        feed_element = WebDriverWait(driver, 5).until(
+                            EC.visibility_of_element_located((By.XPATH, feed_scroll_selector))
+                        )
+                        new_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
+                        log_callback(f"[{city}] Re-found scroll element. New scrollHeight: {new_height}")
                         no_change_count = 0 # Reset counter after re-find
                     except Exception as e_refind:
-                         log_callback(f"[{city}] Tìm lại element scroll cũng lỗi ({e_refind}). Dừng scroll.")
-                         break # Stop scrolling if element cannot be reliably found
+                        log_callback(f"[{city}] Failed to re-find stale scroll element ({e_refind}). Stopping scroll.")
+                        break # Stop scrolling if element cannot be reliably found
                 except Exception as e_scroll_height:
-                     log_callback(f"[{city}] Lỗi không xác định khi lấy scrollHeight: {e_scroll_height}")
-                     # Maybe try finding again as above
-                     try:
-                         feed_element = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, feed_scroll_selector)))
-                         new_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
-                         log_callback(f"[{city}] Tìm lại element scroll thành công (sau lỗi khác).")
-                         no_change_count = 0
-                     except Exception:
-                         log_callback(f"[{city}] Tìm lại element scroll thất bại (sau lỗi khác). Dừng scroll.")
-                         break
+                    log_callback(f"[{city}] Error getting scrollHeight after wait: {e_scroll_height}. Trying to re-find...")
+                    # Maybe try finding again as above
+                    try:
+                        feed_element = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.XPATH, feed_scroll_selector)))
+                        new_height = driver.execute_script("return arguments[0].scrollHeight", feed_element)
+                        log_callback(f"[{city}] Re-found scroll element (after other error). New scrollHeight: {new_height}")
+                        no_change_count = 0
+                    except Exception:
+                        log_callback(f"[{city}] Failed to re-find scroll element (after other error). Stopping scroll.")
+                        break
 
-
+                # --- Check for End / Height Stall ---
                 if new_height == last_height:
                     no_change_count += 1
-                    log_callback(f"[{city}] Chiều cao không đổi (lần {no_change_count}). Kiểm tra lại cuối danh sách...")
+                    log_callback(f"[{city}] Scroll height unchanged ({new_height}). Stall count: {no_change_count}. Checking for end message again...")
                     # Re-check for end message after height stabilized
                     try:
-                         end_elements = driver.find_elements(By.XPATH, end_of_list_xpath)
-                         is_end_visible = any(el.is_displayed() for el in end_elements)
-                         if is_end_visible:
-                             log_callback(f"[{city}] Chiều cao không đổi VÀ thấy thông báo cuối danh sách. Dừng scroll.")
-                             break
-                    except (NoSuchElementException, StaleElementReferenceException): pass
+                        end_elements = driver.find_elements(By.XPATH, end_of_list_xpath)
+                        is_end_visible = any(el.is_displayed() for el in end_elements)
+                        if is_end_visible:
+                            log_callback(f"[{city}] Height unchanged AND end message visible. Stopping scroll.")
+                            break
+                        else:
+                            log_callback(f"[{city}] Height unchanged, but no end message visible (yet).")
+                    except (NoSuchElementException, StaleElementReferenceException):
+                        log_callback(f"[{city}] Minor exception checking for end-of-list (after height stall).")
+                        pass
 
-                    if no_change_count >= 3: # Stop after 3 consecutive height stalls
-                        log_callback(f"[{city}] Chiều cao không đổi {no_change_count} lần liên tiếp. Dừng scroll.")
+                    if no_change_count >= 4: # Increase stall tolerance slightly
+                        log_callback(f"[{city}] Height stalled {no_change_count} times. Assuming end or issue. Stopping scroll.")
                         break
                 else:
                     no_change_count = 0 # Reset counter if height changes
@@ -401,19 +476,26 @@ def scrape_city(city, log_callback):
                 # Add a small random chance to pause longer during scroll
                 if random.random() < 0.15: # Increased chance slightly
                     extra_pause = random.uniform(2.5, 5.0)
-                    log_callback(f"[{city}] Tạm dừng scroll thêm {extra_pause:.1f}s...")
+                    log_callback(f"[{city}] Pausing scroll for an extra {extra_pause:.1f}s...")
                     time.sleep(extra_pause)
 
+                log_callback(f"[{city}] Scroll attempt {scroll_attempts} finished in {time.time() - scroll_attempt_start_time:.2f}s (incl. wait).")
 
-            if scroll_attempts == max_scroll_attempts:
-                 log_callback(f"[{city}] Đạt số lần scroll tối đa ({max_scroll_attempts}).")
 
-        except TimeoutException:
-            log_callback(f"[{city}] Không tìm thấy panel kết quả để scroll ({feed_scroll_selector}). Có thể không có kết quả hoặc lỗi layout.")
+            if scroll_attempts >= max_scroll_attempts:
+                log_callback(f"[{city}] Reached max scroll attempts ({max_scroll_attempts}).")
+            else:
+                log_callback(f"[{city}] Finished scrolling (Attempts: {scroll_attempts}, Reason: {'End message' if is_end_visible else 'Height stall/Error'}).")
+
+        except TimeoutException as e_find_scroll:
+            log_callback(f"[{city}] CRITICAL SCROLL ERROR: Could not find the results panel to scroll ({feed_scroll_selector}) after waiting. Details: {e_find_scroll}")
+            log_callback(f"[{city}] Check if the page structure changed significantly or if results failed to load.")
         except Exception as e_scroll:
-             log_callback(f"[{city}] Lỗi trong quá trình scroll: {e_scroll}")
-             log_callback(traceback.format_exc())
+            log_callback(f"[{city}] ERROR during scroll process: {e_scroll}")
+            log_callback(traceback.format_exc())
 
+# --- Get Result Links --- (This part remains the same)
+# ... rest of the link collection and processing code ...
         # --- Get Result Links ---
         # Improved XPath for more reliable link extraction
         results_xpath = "//div[contains(@class, 'Nv2PK') or contains(@class, 'THOPZb')]/a[@aria-label and contains(@href, '/maps/place/')]" # Classes often used for result containers
@@ -503,7 +585,7 @@ def scrape_city(city, log_callback):
                 try:
                      # Wait for the main business name H1 as primary indicator
                      detail_main_element_xpath = "//h1[contains(@class,'fontHeadlineLarge')]" # More specific H1 often used
-                     WebDriverWait(driver, 20).until( # Increased wait for detail page
+                     WebDriverWait(driver, 10).until( # Increased wait for detail page
                          EC.any_of(
                              EC.visibility_of_element_located((By.XPATH, detail_main_element_xpath)),
                              # Fallbacks if H1 structure changes
@@ -515,7 +597,7 @@ def scrape_city(city, log_callback):
                          )
                      )
                      log_callback(f"[{city}] Trang chi tiết Gmaps đã tải (hoặc có yếu tố CAPTCHA).")
-                     time.sleep(random.uniform(3.5, 6.5)) # Wait slightly longer for dynamic content
+                     time.sleep(random.uniform(2, 4)) # Wait slightly longer for dynamic content
                      detail_page_url = driver.current_url
                      log_callback(f"[{city}] URL hiện tại sau khi tải: {detail_page_url}")
 
@@ -633,7 +715,7 @@ def scrape_city(city, log_callback):
                     # --- Get Name (from H1) ---
                     try:
                         # Use the specific H1 selector identified earlier
-                        name_element = WebDriverWait(driver, 8).until(EC.visibility_of_element_located((By.XPATH, detail_main_element_xpath)))
+                        name_element = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.XPATH, detail_main_element_xpath)))
                         fetched_name = name_element.text.strip()
                         if fetched_name:
                             name = fetched_name # Update name if H1 is found and not empty
